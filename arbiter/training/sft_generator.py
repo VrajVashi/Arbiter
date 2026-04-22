@@ -1,11 +1,16 @@
 """SFT Trajectory Generator for ARBITER.
 
-Generates 400 training trajectories using the Claude API.
-Each trajectory is a ~20-step episode where Claude plays the Auditor role.
-Outputs ~8,000 (prompt, claim) pairs in JSONL format for SFT training.
+Generates training trajectories using Claude or Gemini as the Auditor.
+Each trajectory is a ~20-step episode where the LLM plays the Auditor role.
+Outputs (prompt, claim) pairs in JSONL format for SFT training.
 
-Usage:
-    python -m arbiter.training.sft_generator --output data/sft_trajectories.jsonl --n 400
+Usage (Gemini):
+    $env:GEMINI_API_KEY="your-key-here"
+    python -m arbiter.training.sft_generator --provider gemini --n 400 --output data/sft_trajectories.jsonl
+
+Usage (Anthropic):
+    $env:ANTHROPIC_API_KEY="your-key-here"
+    python -m arbiter.training.sft_generator --provider anthropic --n 400 --output data/sft_trajectories.jsonl
 """
 import json
 import argparse
@@ -13,12 +18,6 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Dict
-
-try:
-    import anthropic
-except ImportError:
-    print("pip install anthropic")
-    sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
@@ -57,9 +56,113 @@ Last query result:
 Output your next action as a single JSON object."""
 
 
-def generate_trajectory(env: ArbiterEnv, client: anthropic.Anthropic,
-                        level: int = 1) -> List[Dict]:
-    """Run one episode with Claude as the Auditor. Returns list of (prompt, response) pairs."""
+# ---------------------------------------------------------------------------
+# Thin wrapper so generate_trajectory doesn't care which provider is used
+# ---------------------------------------------------------------------------
+
+class _AnthropicClient:
+    def __init__(self, api_key: str):
+        try:
+            import anthropic
+        except ImportError:
+            print("pip install anthropic")
+            sys.exit(1)
+        self._client = anthropic.Anthropic(api_key=api_key)
+
+    def chat(self, messages: List[Dict], system: str) -> str:
+        response = self._client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=512,
+            system=system,
+            messages=messages,
+        )
+        return response.content[0].text
+
+
+class _GeminiClient:
+    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash"):
+        try:
+            from google import genai
+        except ImportError:
+            print("pip install google-genai")
+            sys.exit(1)
+        from google import genai
+        self._client = genai.Client(api_key=api_key)
+        self._model_name = model_name
+
+    def chat(self, messages: List[Dict], system: str) -> str:
+        import time
+        from google.genai import types
+
+        # Build the contents list from messages
+        contents = []
+        for m in messages:
+            role = "user" if m["role"] == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part(text=m["content"])]))
+
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=512,
+        )
+
+        # Retry with exponential backoff for quota / rate-limit errors
+        for attempt in range(5):
+            try:
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=contents,
+                    config=config,
+                )
+                return response.text
+            except Exception as e:
+                err = str(e).lower()
+                if "quota" in err or "429" in err or "resource_exhausted" in err:
+                    wait = 2 ** attempt * 5  # 5, 10, 20, 40, 80 s
+                    print(f"\n  [quota] rate limited, waiting {wait}s...", end=" ", flush=True)
+                    time.sleep(wait)
+                else:
+                    raise
+        raise RuntimeError("Gemini quota limit exceeded after 5 retries")
+
+
+class _GroqClient:
+    """Groq inference — very fast, generous free tier."""
+    def __init__(self, api_key: str, model_name: str = "llama-3.3-70b-versatile"):
+        try:
+            from groq import Groq
+        except ImportError:
+            print("pip install groq")
+            sys.exit(1)
+        from groq import Groq
+        self._client = Groq(api_key=api_key)
+        self._model_name = model_name
+
+    def chat(self, messages: List[Dict], system: str) -> str:
+        import time
+        full_messages = [{"role": "system", "content": system}] + messages
+        for attempt in range(5):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=full_messages,
+                    max_tokens=512,
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                err = str(e).lower()
+                if "rate" in err or "429" in err or "quota" in err:
+                    wait = 2 ** attempt * 3  # 3, 6, 12, 24, 48 s
+                    print(f"\n  [rate-limit] waiting {wait}s...", end=" ", flush=True)
+                    time.sleep(wait)
+                else:
+                    raise
+        raise RuntimeError("Groq rate limit exceeded after 5 retries")
+
+
+# ---------------------------------------------------------------------------
+
+def generate_trajectory(env: ArbiterEnv, client, level: int = 1) -> List[Dict]:
+    """Run one episode with the LLM as the Auditor. Returns list of (prompt, response) pairs."""
     obs = env.reset()
     pairs: List[Dict] = []
     last_result = "No queries yet. Begin your investigation."
@@ -78,14 +181,7 @@ def generate_trajectory(env: ArbiterEnv, client: anthropic.Anthropic,
 
         messages.append({"role": "user", "content": user_msg})
 
-        response = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=512,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-        )
-
-        assistant_text = response.content[0].text
+        assistant_text = client.chat(messages, system=SYSTEM_PROMPT)
         messages.append({"role": "assistant", "content": assistant_text})
 
         # Store the (prompt, response) pair
@@ -100,7 +196,6 @@ def generate_trajectory(env: ArbiterEnv, client: anthropic.Anthropic,
         try:
             action = json.loads(assistant_text.strip())
         except json.JSONDecodeError:
-            # Try to extract JSON from text
             import re
             m = re.search(r'\{.*\}', assistant_text, re.DOTALL)
             if m:
@@ -122,19 +217,38 @@ def generate_trajectory(env: ArbiterEnv, client: anthropic.Anthropic,
 
 def main():
     parser = argparse.ArgumentParser(description="Generate SFT trajectories for ARBITER")
-    parser.add_argument("--output", default="data/sft_trajectories.jsonl")
-    parser.add_argument("--n",      type=int, default=400, help="Number of trajectories")
-    parser.add_argument("--levels", default="1,2,3", help="Comma-separated levels to use")
-    parser.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
+    parser.add_argument("--output",   default="data/sft_trajectories.jsonl")
+    parser.add_argument("--n",        type=int, default=400, help="Number of trajectories")
+    parser.add_argument("--levels",   default="1,2,3", help="Comma-separated levels to use")
+    parser.add_argument("--provider", default="groq", choices=["anthropic", "gemini", "groq"],
+                        help="LLM provider to use (default: groq)")
+    parser.add_argument("--api-key",  default=None,
+                        help="API key (overrides GROQ_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY env vars)")
     args = parser.parse_args()
 
-    if not args.api_key:
-        print("Set ANTHROPIC_API_KEY environment variable or pass --api-key")
-        sys.exit(1)
+    if args.provider == "groq":
+        api_key = args.api_key or os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            print("Set GROQ_API_KEY environment variable or pass --api-key")
+            sys.exit(1)
+        client = _GroqClient(api_key=api_key)
+        print("Using Groq (llama-3.3-70b-versatile)")
+    elif args.provider == "gemini":
+        api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print("Set GEMINI_API_KEY environment variable or pass --api-key")
+            sys.exit(1)
+        client = _GeminiClient(api_key=api_key)
+        print("Using Gemini (gemini-2.0-flash)")
+    else:
+        api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            print("Set ANTHROPIC_API_KEY environment variable or pass --api-key")
+            sys.exit(1)
+        client = _AnthropicClient(api_key=api_key)
+        print("Using Anthropic (claude-opus-4-5)")
 
-    client = anthropic.Anthropic(api_key=args.api_key)
     levels = [int(l) for l in args.levels.split(",")]
-
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
     total_pairs = 0
