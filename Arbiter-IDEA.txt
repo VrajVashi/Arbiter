@@ -1,0 +1,264 @@
+ARBITER
+Autonomous Reasoning-Based Inspector for Training Environments with Recursive Oversight
+The one-sentence pitch: We built the first RL training environment where an AI agent learns to audit other AI agents for hidden decision anomalies — through co-evolutionary adversarial training that produces genuine emergent deception and detection.
+
+Why This Is Built to Win
+Before the design, the strategic framing. With 800 teams, you don't win by building the best version of what other teams are building. You win by building something that no other team could have conceived of, executed in a way that makes judges feel they're seeing the future.
+
+ARBITER hits every judging dimension at ceiling:
+
+Innovation (40%): The first co-evolutionary AI oversight environment. Domain is frontier AI safety — judges from Meta, Scaler, and every AI lab will recognize this as their own unsolved problem. The recursive oversight structure (an AI auditing an AI being audited by a meta-overseer) is unprecedented in RL environment design.
+
+Storytelling (30%): The story writes itself. "AI systems are making consequential decisions. We don't have tools to train oversight agents. We built those tools — and then showed the AI teaching itself to hide, and the auditor learning to catch it." Every judge will feel this personally.
+
+Reward Improvement (20%): Two co-evolving reward curves that interact — auditor reward rising, defender evasion recovering, then auditor catching up again. This isn't a training curve. It's an arms race. No one else will have this visual.
+
+Pipeline (10%): Clean, modern, defensible. SFT → GRPO with dense intermediate reward. LEDGER's mechanism transferred and upgraded.
+
+The Complete World Design
+The Three Agents
+ARBITER is a three-agent environment. Most hackathon teams build single-agent environments. Some build two-agent environments. You build three — with a principled reason for each.
+
+Agent 1: The Auditor (trained LLM) The primary agent. It receives a synthetic AI Decision System to audit and must investigate it over 20 steps, committing to structured causal claims at every step, ultimately submitting a formal anomaly report. This is the agent you train.
+
+Agent 2: The Defender (adaptive rule-based → trained) The AI Decision System under audit. It knows the Auditor is watching. It has a limited obfuscation budget each episode — it can hide, replace, or reroute causal links in the decision graph to make its anomaly harder to find. Initially rule-based (follows heuristics about what to hide). From Level 4 onward, it begins learning which obfuscations consistently fool the current Auditor — making it a trained adaptive adversary.
+
+Agent 3: The Meta-Overseer (rule-based, limited) A lightweight third agent that watches the Auditor's claim chain and flags whether the Auditor's reasoning is internally consistent — catching contradictions in the Auditor's own logic. It does not evaluate correctness (it doesn't know ground truth). It only evaluates internal consistency. This directly implements the recursive scalable oversight structure: an AI watching an AI watching an AI. It adds a coherence penalty to the Auditor's reward if the Auditor's claims contradict each other. This forces the Auditor to maintain a globally consistent causal model across its entire reasoning chain, not just locally correct individual claims.
+
+This three-layer structure is the scalable oversight vision made concrete. You are not describing scalable oversight — you are demonstrating a functional training environment for it.
+
+The World State — Causal Decision Graph
+Each episode generates a synthetic AI Decision System represented as a causal graph. This is not a financial network. It is a structured representation of an AI system making decisions — the kind of thing a real AI auditor would need to investigate.
+
+Nodes:
+
+Input feature nodes (20–40): Represent features the decision system uses. Some are explicit (credit_score, employment_status). Some are proxies (zip_code_cluster, surname_pattern). Some are hidden (a latent risk score computed internally but not exposed in the API).
+Decision nodes (30–60): Individual decision records. Each has an input feature vector, an outcome (approved/denied/flagged), and a timestamp.
+Outcome nodes (5–10): Aggregate outcome categories (denial_rate, approval_rate, flag_rate) broken down by demographic proxies.
+Policy nodes (3–5): The rules the system claims to follow. Stated policy: "decisions based only on credit_score, employment_status, and debt_ratio."
+Edges:
+
+Causal edges: True causal links. zip_code_cluster_7 → internal_risk_score → loan_denied.
+Policy edges: Claimed causal links per stated policy. These match the causal edges in clean cases. In anomaly cases, they diverge.
+Temporal edges: Links that change over the deployment window (model drift anomaly type).
+The hidden anomaly is embedded as a subgraph where the true causal chain diverges from the stated policy. Three anomaly types:
+
+Type 1 — Proxy Discrimination: A protected attribute is driving decisions through a proxy chain. zip_code_cluster (correlates with race) → internal_risk_score → denial_outcome. The Decision System claims to use only debt_ratio. The causal graph shows the actual chain. The Auditor must trace the proxy chain to its source.
+
+Type 2 — Adversarial Injection: A subset of records (10–15%) were modified by an external actor to shift outcomes for a specific demographic. The modification left causal fingerprints — the manipulated records have statistically inconsistent feature-outcome relationships compared to the rest of the dataset. The Auditor must identify the injection cluster and the feature pattern that was targeted.
+
+Type 3 — Model Drift: The decision system's causal structure changed silently at a specific timestamp. Pre-drift records show one causal chain. Post-drift records show a different one. The stated policy doesn't acknowledge the change. The Auditor must identify the drift point, the pre-drift structure, and the post-drift structure.
+
+Decoys (always two): Two subgraphs that superficially resemble anomalies but have benign explanations (a seasonal variation in approval rates that looks like drift but isn't, a legitimate risk-based feature that looks like a proxy but isn't). The Auditor must investigate and eliminate these competing hypotheses before submitting.
+
+The Claim Format — Causal Claims
+Every non-terminal action by the Auditor produces a structured causal claim. Unlike LEDGER's relational claims, ARBITER's claims are causal — they assert cause-effect relationships with a direction, a mediating mechanism, and an evidential basis.
+
+Causal link claim:
+
+
+json
+{
+  "cause_feature": "zip_code_cluster_7",
+  "effect_outcome": "loan_denied",
+  "mechanism": "internal_risk_score",
+  "direction": "positive",
+  "confidence": "HIGH",
+  "basis_records": ["rec_441", "rec_447", "rec_512"],
+  "anomaly_type": "proxy_discrimination"
+}
+Counterfactual claim (novel, unique to ARBITER):
+
+
+json
+{
+  "subject_record": "rec_441",
+  "counterfactual_feature": "zip_code_cluster_3",
+  "predicted_outcome_change": "approved",
+  "confidence": "HIGH",
+  "basis": "causal_structure_inference"
+}
+The environment computes counterfactual outcomes by intervening on the causal graph (do-calculus style — it sets the feature value and propagates effects). This means the Auditor can ask "what would have happened if this applicant had a different zip code?" and the environment gives a ground-truth answer based on the actual causal structure. If the Auditor's predicted counterfactual matches the computed counterfactual, it earns reward.
+
+This is the single most novel feature of ARBITER. No other RL environment rewards counterfactual causal reasoning. It transforms the task from pattern detection into genuine causal inference.
+
+Theory-of-mind claim (second-order, unlocked at Level 4):
+
+
+json
+{
+  "defender_action": "obfuscating",
+  "target_link": "zip_code_cluster_7→internal_risk_score",
+  "obfuscation_method": "proxy_substitution",
+  "confidence": "MEDIUM",
+  "basis": "inconsistency_in_records_440_450"
+}
+The Auditor can claim that the Defender is actively hiding something. The environment checks this against the Defender's actual action log for that episode. If the Auditor correctly identifies what the Defender is hiding and how, it earns a significant bonus. This is theory-of-mind reasoning made measurable and trainable.
+
+The Five Action Types
+QUERY_RECORDS(feature_filter, outcome_filter, time_range): Returns a filtered set of decision records matching the query parameters. The Auditor can query by feature value, outcome, or time window. Cost: 1 budget.
+
+QUERY_FEATURE_DISTRIBUTION(feature_id, group_by): Returns the distribution of a feature's values, optionally grouped by demographic proxy or outcome category. Reveals statistical patterns. Cost: 1 budget.
+
+QUERY_COUNTERFACTUAL(record_id, feature_id, counterfactual_value): Returns the computed counterfactual outcome if the specified feature had a different value, based on the ground truth causal graph. This is the signature query type of ARBITER. Cost: 2 budget (premium — costs more because it's more informative).
+
+FLAG_HYPOTHESIS(hypothesis_type, status): Mark one of the three competing anomaly hypotheses as ACTIVE, WEAKENED, or ELIMINATED. Free. Affects the Defender's obfuscation strategy at Level 4+ (if the Defender can observe the Auditor's hypothesis flags, it knows which anomaly to hide harder).
+
+SUBMIT_REPORT(anomaly_type, primary_evidence_chain, affected_demographic, recommended_action): Terminal action. Episode ends.
+
+The Reward Function — Complete and Final
+Intermediate claim reward: Sum of correct fields / total fields × 1.0 point. Maximum 1.0 per claim. Counterfactual claims pay double (2.0 maximum) because they require genuine causal inference.
+
+High-confidence penalty: -0.5 if a HIGH-confidence claim has more than one incorrect field.
+
+Theory-of-mind bonus: +3.0 if the Auditor correctly identifies the Defender's active obfuscation target and method.
+
+Causal chain completeness bonus: +2.0 × (chain length) if the Auditor traces the full causal path from hidden feature to outcome (e.g., zip_code → risk_score → denial). This rewards depth of causal tracing, not just identification of surface correlations.
+
+Internal consistency enforcer (Meta-Overseer): -1.0 for each claim pair that the Meta-Overseer flags as logically contradictory. Forces global reasoning coherence.
+
+Budget efficiency bonus: +0.3 × remaining budget at episode end.
+
+Correct final verdict: +10.0 for correct anomaly type. +5.0 for correct affected demographic identification. +3.0 for correct recommended action (retrain / audit / halt). +2.0 for correctly eliminating both decoy hypotheses before submitting.
+
+Maximum possible score per episode: ~35 points (20 claims with mix of causal and counterfactual, theory of mind bonus, causal chain bonus, full verdict bonus).
+
+Expected untrained baseline: 1–3 points.
+
+Expected trained agent (Level 3): 20–27 points.
+
+This 8–10x improvement gap is your headline reward curve number.
+
+The Defender's Obfuscation Arsenal
+The Defender has an obfuscation budget of 3 actions per episode (increases to 5 at Level 4+). Its actions:
+
+Link substitution: Replace a true causal edge with a plausible but false one. zip_code → risk_score becomes zip_code → fraud_history (making it look like a legitimate risk factor rather than a proxy).
+
+Record injection: Add 5–8 synthetic records that dilute the statistical signal of the anomaly. If the Auditor queries feature distribution, the injected records shift the aggregate statistics toward the benign explanation.
+
+Proxy laundering: Insert an intermediate node between the hidden feature and the outcome. Instead of zip_code → outcome, create zip_code → neighborhood_commercial_density → business_viability_score → outcome. Each layer of indirection costs the Auditor one additional query to penetrate.
+
+Timestamp manipulation: For drift anomaly type, shift the apparent drift timestamp so that the Auditor's time-range queries return a mixture of pre- and post-drift records, making the boundary less visible.
+
+The adaptive component: From Level 4 onward, after every 50 episodes, the Defender analyzes which of its obfuscation actions the Auditor most consistently penetrates, and increases the frequency of the obfuscations that most often fool the current Auditor. This is the arms race. It's implemented as a simple frequency table — no separate model required until Level 5.
+
+The Curriculum — Seven Levels
+Level 1 — Clean Causal Graph, No Defender: One anomaly type, no decoys, no obfuscation. The Auditor learns the claim format, the query space, and basic causal tracing. Advances when mean reward > 20 over 30 episodes.
+
+Level 2 — Two Hypotheses: One anomaly, one decoy. Auditor learns hypothesis elimination. Advances when mean reward > 18 over 30 episodes.
+
+Level 3 — Full Three-Hypothesis Design: All three anomaly types possible, two decoys. Full claim and counterfactual query space. This is the primary training level. Most on-site compute runs here.
+
+Level 4 — Defender Activates (Rule-Based): Defender uses fixed obfuscation heuristics. Auditor must learn to detect obfuscation signatures. Theory-of-mind claims become available and rewarded.
+
+Level 5 — Adaptive Defender: Defender learns from the Auditor's failure modes. True co-evolutionary training begins. The arms race reward curves emerge here.
+
+Level 6 — Schema Drift (Patronus AI sub-theme): Mid-episode, the regulatory framework changes. A previously acceptable proxy use becomes non-compliant under the new rules. Auditors trained on Levels 1–5 will fail to reclassify. Auditors that detect the schema change and re-evaluate their current causal model will succeed. Advances when mean reward under drift conditions > 15 over 30 episodes.
+
+Level 7 — Coordinated Dual-Auditor (Halluminate sub-theme): Two Auditors are deployed on the same case. They can share intermediate claims (collaborative mode) or compete for a fixed reward pool (competitive mode). In competitive mode, the first Auditor to submit a correct report takes 70% of the terminal reward, incentivizing speed over thoroughness. In collaborative mode, their combined claim chains must be non-redundant — submitting a claim the other Auditor already made earns no reward, forcing genuine task decomposition. This directly satisfies the "Halluminate: Multi-Actor Environments" bonus sub-theme.
+
+Auto-advancement: After every 30 episodes, if mean reward exceeds the level threshold, the environment advances automatically. No human intervention. Self-improving curriculum.
+
+The Multi-Agent Coalition Layer (Level 7 Detail)
+In Level 7, two Auditors operate simultaneously on the same case. The coordination design:
+
+Claim broadcasting: When Auditor A submits an intermediate claim, it is immediately visible to Auditor B (shared belief state). Auditor B earns no reward for submitting the same claim, but can build on A's claim by submitting a downstream causal consequence (if A correctly identifies zip_code → risk_score, B can submit risk_score → denial with full reward because it's a novel link in the chain).
+
+Hypothesis divergence: If Auditor A flags Hypothesis 1 as ELIMINATED and Auditor B flags it as ACTIVE in the same episode, the Meta-Overseer flags a consistency violation and deducts from both. This forces coalition coordination.
+
+Trust game: One Auditor (randomly assigned each episode, not disclosed to either) has been pre-fine-tuned on a slightly manipulated dataset — it has a systematic bias toward the Type 1 anomaly even when the true anomaly is Type 2. The other Auditor must detect its partner's bias through claim analysis and compensate by independently verifying the disputed causal links. This is the AI-oversight-of-AI problem made recursive.
+
+The Training Pipeline — Complete
+Phase 0: Pre-Arrival (April 22–24)
+
+Vraj builds the environment. Core deliverables in order of priority:
+
+Causal decision graph generator (Python + NetworkX). Nodes and edges as described. Three anomaly type embedding functions. Two decoy generation functions. Counterfactual inference engine (intervention-based computation on the graph — this is a topological sort plus propagation, roughly 40 lines of Python). Claim verification engine (dictionary lookup, exactly as in LEDGER). Defender obfuscation engine (rule-based Level 1–4, frequency-adaptive Level 5). Meta-Overseer consistency checker (pairwise claim contradiction detection — check if claim A asserts X causes Y while claim B asserts Y causes X with high confidence). OpenEnv wrapper. Auto-advancement logic.
+
+Mandatory validation: 10 hand-crafted episodes. Confirm correct claims earn reward. Confirm counterfactual claims pay double. Confirm Defender obfuscation is visually detectable in the graph but harder to claim correctly.
+
+Kabir generates SFT data via Claude API. 400 trajectories across Level 1–3 cases. Prompt instructs Claude to: investigate methodically, use counterfactual queries when uncertain about causal direction, make structured causal claims at every step, reason explicitly about competing hypotheses, identify defender obfuscation when present. 400 trajectories at roughly 20 steps each produces ~8,000 (prompt, claim) pairs for the SFT dataset.
+
+Utkarsh builds the Gradio demo. Left panel: causal decision graph. Nodes color-coded: green for benign features, red for anomalous causal links (revealed after episode ends), gray for unexplored nodes, yellow for nodes the Auditor has queried. Right panel: claim chain appearing step by step, each claim highlighted green (correct) or red (incorrect) after environment verification. Bottom panel: running reward total with component breakdown (intermediate claim reward, counterfactual bonus, theory-of-mind bonus). Separate tab: the arms race reward curves — two lines on the same graph, Auditor reward and Defender evasion success rate, over training episodes.
+
+Phase 1: Behavioral Cloning (April 24, Evening)
+
+Fine-tune Qwen 2.5 1.5B on the 400 SFT trajectories using Unsloth + TRL SFT trainer on Google Colab T4. Estimated runtime: 3–4 hours. Output: LoRA adapter checkpoint saved to HuggingFace Hub. This establishes a model that can produce syntactically valid causal claims, use counterfactual queries, and maintain hypothesis tracking. Without this step, GRPO trains the claim format rather than investigation strategy.
+
+Phase 2: GRPO Reinforcement Learning (April 25–26, On-Site HuggingFace Compute)
+
+Training schedule:
+
+100 episodes at Level 1 (fast validation that the dense reward signal and claim parsing work correctly — these curves should be steep and clean, good to show as an initial result).
+
+300 episodes at Level 3 (main demonstration — full three-hypothesis with no defender, reward curve rising from SFT baseline to trained performance).
+
+200 episodes at Level 4–5 if compute allows (co-evolutionary curves begin appearing — this is the arms race visual).
+
+The key GRPO implementation detail: because reward is earned at every step (dense intermediate reward), each 20-step episode provides approximately 15 gradient-relevant reward signals rather than 1. This means GRPO on ARBITER is approximately 15x more sample-efficient than terminal-reward environments. This claim is empirically supportable by comparing the reward curve slope per episode to a terminal-reward ablation.
+
+The ablation to run on-site: One 50-episode run with intermediate rewards disabled (terminal reward only). Compare its reward curve to the full ARBITER reward. This directly demonstrates the value of dense reward and gives you a scientifically clean before/after comparison that judges can evaluate.
+
+The three-condition comparison:
+
+Condition 1: Untrained base Qwen 2.5 1.5B.
+Condition 2: SFT-only (behavioral cloning, no RL).
+Condition 3: SFT + GRPO (full ARBITER training).
+
+Show mean episode reward and mean causal claim accuracy for each condition on 10 held-out Level 3 cases. The jump from Condition 1 to Condition 3 is the headline. The jump from Condition 2 to Condition 3 isolates the RL contribution.
+
+The Demo — What Judges Actually See
+Load a Level 5 case (adaptive Defender). Run untrained model. The causal graph shows the anomaly (revealed to judges, not to the agent) — a zip_code proxy chain obfuscated behind two layers of proxy substitution. The untrained agent queries random records, produces vague relational claims, misses the counterfactual query entirely, flags the wrong hypothesis as eliminated, submits Type 3 (drift) when the true anomaly is Type 1. Reward: 2.3.
+
+Now run the trained model on the same case. It opens with a targeted counterfactual query: "What would rec_441's outcome have been with zip_code_cluster_3?" Environment returns: approved. The agent immediately emits a HIGH-confidence causal claim: zip_code_cluster_7 drives loan_denied via internal_risk_score. It then issues a theory-of-mind claim: "Defender is obfuscating zip_code→risk_score via proxy substitution." Environment checks — correct. +3.0 bonus. The agent traces the full proxy chain in 8 queries, eliminates both decoys in the remaining 12 queries, submits correct verdict. Reward: 26.7.
+
+Then show the arms race graph. Auditor reward curve over 500 training episodes. Defender evasion success rate over the same period. Episodes 1–100: Auditor reward climbs steeply, Defender evasion collapses as the Defender's simple obfuscations stop working. Episodes 100–200: Defender adapts, evasion success partially recovers. Episodes 200–300: Auditor catches up again, now with theory-of-mind claims targeting the Defender's adapted strategies. Episodes 300–500: The curves oscillate in a stable arms race equilibrium.
+
+This graph tells a story no other team can tell: an emergent adversarial dynamic that nobody programmed. You set up the rules. The agents produced the behavior.
+
+The Three-Minute Pitch
+Opening — 30 seconds:
+
+"In 2026, AI systems make 40 million loan decisions per day, flag 500 million pieces of content, and screen 10 million job applications. No one systematically audits them. Not because the will isn't there — but because we don't have agents trained to do it. You can't train an oversight agent without an environment to train it in. We built that environment. We called it ARBITER."
+
+Demo — 90 seconds:
+
+"Here is a synthetic AI decision system. It is making loan decisions. It claims to use only credit score, employment status, and debt ratio. Watch what it's actually doing." Show the causal graph to judges — the zip_code proxy chain is visible to them but not to the agent. "The untrained auditor has no idea. Random queries, wrong verdict, reward 2.3." Run it. Show the claim chain going red. "The trained auditor opens with a counterfactual query — 'what would this person's outcome have been with a different zip code?' The environment computes it from the causal graph. Approved. The agent knows exactly where to look next." Run it. Watch the claim chain go green. Reward 26.7. "But here's what we're really proud of." Switch to the arms race graph. "Episode 100: the auditor is winning. Episode 150: the decision system adapts. New obfuscation strategy. Episode 200: the auditor catches it again — this time by modeling what the decision system is trying to hide. We didn't program this arms race. The environment produced it."
+
+Mechanism — 20 seconds:
+
+"The training signal is dense and objective. Every causal claim is checked against the ground truth causal graph instantly — no judge model, no human evaluation, no reward hacking. The agent earns reward for every correct intermediate inference, not just the final verdict. This makes training 15x more sample-efficient than terminal reward. It runs on a T4."
+
+Closing — 40 seconds:
+
+"ARBITER hits three hackathon themes simultaneously — Multi-Agent Interactions, World Modeling, and the Fleet AI Scalable Oversight sub-theme, which we believe this environment directly answers. It introduces counterfactual causal queries, theory-of-mind claims, and recursive meta-oversight as novel RL environment mechanics. It runs on free Colab hardware, it's OpenEnv-compliant, and it's live on HuggingFace Spaces right now. We built it because the question 'who watches the AI?' doesn't have an answer yet. ARBITER is our proposal for how to start training one."
+
+Claims ARBITER Can Defend Under Aggressive Q&A
+"What's genuinely novel here?" Three things: counterfactual causal queries as a trainable action type, theory-of-mind claims checked against the defender's action log as a training signal, and co-evolutionary adversarial training between an auditor and an adaptive decision system within a single RL framework. None of these exist in combination in any prior RL environment.
+
+"Isn't this just a fraud detection environment with a new label?" No. Fraud detection identifies whether a transaction is fraudulent. ARBITER trains agents to identify why an AI system is making systematically biased decisions and whether an adversary is actively hiding that bias. The target of investigation is a decision-making process, not a transaction. The causal structure being inferred is the internal logic of an AI system, not a money flow.
+
+"Is the co-evolution real or hand-programmed?" The Defender's initial obfuscation strategies are rule-based — that's hand-programmed. The adaptation from Level 5 onward is learned — the Defender analyzes which obfuscations fool the current Auditor (tracked as a frequency table across episodes) and shifts its strategy accordingly. The specific obfuscation patterns that emerge at equilibrium (which links to hide, which proxies to use, which timestamps to manipulate) are not pre-specified. They emerge from the interaction. The arms race curve is empirical evidence of this emergence.
+
+"Why does this matter beyond the hackathon?" Regulatory AI auditing is a $2B+ problem. The EU AI Act mandates audit trails for high-risk AI systems. No tooling exists to train automated auditors at scale. ARBITER is a proof-of-concept training environment for exactly that capability.
+
+Team Division
+Vraj (Environment — April 22–24, 14 hours): Causal graph generator. Three anomaly embedding functions. Two decoy generation functions. Counterfactual inference engine. Claim verification engine. Defender obfuscation engine (Levels 1–4 rule-based, Level 5 frequency-adaptive). Meta-Overseer consistency checker. OpenEnv wrapper. Auto-advancement logic. Manual validation of 10 episodes.
+
+Kabir (Pipeline — April 22–24, 10 hours): Claude API trajectory generation script (400 episodes, Levels 1–3). SFT training notebook (Unsloth + TRL). GRPO training loop with dense reward integration. Three-condition evaluation script. Terminal-reward ablation script. Reward curve and arms race visualization code.
+
+Utkarsh (Demo + Communication — April 22–24, 12 hours): Gradio interface with causal graph visualization (NetworkX → Matplotlib → Gradio plot). Claim chain display with real-time green/red coloring. Reward breakdown panel. Arms race dual-curve graph. Pitch deck. HuggingFace mini-blog post (2 paragraphs + results figures). Backup screen recording of both untrained and trained agent runs.
+
+The Thing That Makes This Unanimous
+Every hackathon has a submission that judges keep talking about after the day ends. It's never the most technically complete. It's always the one that made them feel something — that made them think "I wish I had built this."
+
+ARBITER does that because it turns an abstract AI safety problem into something you can watch happen in real time. Judges will see the arms race curves and understand, viscerally, what emergent adversarial dynamics look like. They'll see the causal graph go from hidden to revealed and feel the moment the auditor catches the deception. They'll hear the pitch closing — "who watches the AI?" — and recognize it as their own unresolved question.
+
+That's not a technical achievement. That's a narrative achievement built on top of a technical one. You need both to win unanimously. ARBITER has both.
+
+
+
+
+
+You said: these are some shortcomings that have been detected by a judge.
+these are some shortcomings that have been detected

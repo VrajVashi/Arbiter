@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Data & outputs
+data/
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/cost.json
+
+# Graphify temp files
+.graphify_*.json
+.graphify_*.txt
+.graphify_python
+
+# Secrets
+.env
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models / checkpoints (large files)
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+lora_adapter/
+
+# Logs
+*.log
+wandb/
+runs/
