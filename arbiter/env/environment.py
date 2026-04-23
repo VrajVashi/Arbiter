@@ -95,7 +95,11 @@ class ArbiterEnv:
         if self._done:
             return self._observation(), 0.0, True, {"error": "episode already done"}
 
-        atype = action.get("type", "")
+        # Accept both "type" (canonical) and "action" (common LLM output key)
+        atype = action.get("type") or action.get("action", "")
+        if isinstance(atype, dict):
+            atype = atype.get("type", atype.get("query_type", ""))
+        atype = (atype or "").upper().strip()
         reward = 0.0
         info   = {}
 
