@@ -96,4 +96,11 @@ def _detect_contradiction(a: Dict, b: Dict) -> str:
                     f"{b.get('cause_feature')} has no effect, but "
                     f"counterfactual predicts outcome change")
 
+    # ── Rule 5: Hypothesis flip-flop (ELIMINATED → ACTIVE for same type) ────
+    if a_type == "hypothesis_flag" and b_type == "hypothesis_flag":
+        if (a.get("hypothesis_type") == b.get("hypothesis_type") and
+                a.get("status") == "ELIMINATED" and b.get("status") == "ACTIVE"):
+            return (f"Hypothesis flip-flop: re-activated eliminated "
+                    f"hypothesis {a.get('hypothesis_type')}")
+
     return ""

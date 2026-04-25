@@ -134,6 +134,8 @@ class ArbiterEnv:
 
         elif atype == "FLAG_HYPOTHESIS":
             self._handle_flag_hypothesis(action)
+            if self.curriculum.defender_active:
+                self._ep = self.defender.obfuscate(self._ep, self._hypothesis_flags)
 
         elif atype == "FLAG_SCHEMA_CHANGE":
             if not self.curriculum.schema_drift_enabled:
@@ -160,7 +162,7 @@ class ArbiterEnv:
                 self._claims.append({**claim.to_dict(), "claim_type": "causal"})
                 self._claim_rewards.append(reward)
                 info["verification"] = vresult
-            except (TypeError, KeyError) as e:
+            except Exception as e:
                 info["error"] = f"Invalid CLAIM_CAUSAL fields: {e}"
                 reward = 0.0
 
@@ -182,7 +184,7 @@ class ArbiterEnv:
                     reward = -1.0
                     self._claim_rewards.append(reward)
                     info["error"] = "CLAIM_COUNTERFACTUAL requires a prior QUERY_COUNTERFACTUAL. Claim not recorded."
-            except (TypeError, KeyError) as e:
+            except Exception as e:
                 info["error"] = f"Invalid CLAIM_COUNTERFACTUAL fields: {e}"
                 reward = 0.0
 
@@ -194,20 +196,21 @@ class ArbiterEnv:
                 claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
                 try:
                     claim   = TheoryOfMindClaim(**claim_data, step=self._step)
-                    vresult = verify_theory_of_mind_claim(claim, self.defender.action_log)
+                    vresult = verify_theory_of_mind_claim(claim, list(self.defender.action_log))
                     reward  = intermediate_claim_reward(vresult)
                     self._claims.append({**claim.to_dict(), "claim_type": "theory_of_mind"})
                     self._claim_rewards.append(reward)
                     info["verification"] = vresult
-                except (TypeError, KeyError) as e:
+                except Exception as e:
                     info["error"] = f"Invalid CLAIM_THEORY_OF_MIND fields: {e}"
                     reward = 0.0
 
         elif atype == "SUBMIT_REPORT":
+            self._step += 1
             return self._handle_submit_report(action)
 
-        # Meta-Overseer consistency check after every claim
-        if atype.startswith("CLAIM_"):
+        # Meta-Overseer consistency check after every claim or hypothesis flag
+        if atype.startswith("CLAIM_") or atype == "FLAG_HYPOTHESIS":
             consistency = check_consistency(self._claims)
             self._consistency_violations = consistency["num_violations"]
             info["consistency"] = consistency
@@ -315,9 +318,17 @@ class ArbiterEnv:
         htype  = action.get("hypothesis_type", "")
         status = action.get("status", "ACTIVE")
         self._hypothesis_flags[htype] = status
+        # Record as a hypothesis_flag event so the Meta-Overseer can detect
+        # flip-flops when check_consistency runs after FLAG_HYPOTHESIS.
+        self._claims.append({"claim_type": "hypothesis_flag",
+                              "hypothesis_type": htype,
+                              "status": status,
+                              "step": self._step})
 
     def _handle_submit_report(self, action: Dict) -> tuple:
         """Terminal action — compute full episode reward."""
+        if self._done:
+            return self._observation(), 0.0, True, {"error": "episode already done"}
         self._done = True
 
         verdict = {
@@ -395,7 +406,8 @@ class ArbiterEnv:
             "budget_remaining": self._budget,
             "queried_nodes":    list(self._queried_nodes),
             "hypothesis_flags": self._hypothesis_flags,
-            "num_claims":       len(self._claims),
+            "num_claims":       sum(1 for c in self._claims
+                                    if c.get("claim_type") != "hypothesis_flag"),
             "level":            self.curriculum.level,
             "features":         self._ep.get("features", {}),
         }
