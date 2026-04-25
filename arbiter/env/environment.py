@@ -148,7 +148,9 @@ class ArbiterEnv:
                 info["schema_verification"] = result
 
         elif atype == "CLAIM_CAUSAL":
-            claim  = CausalLinkClaim(**action["claim"], step=self._step)
+            _SKIP = {"type", "action", "claim"}
+            claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
+            claim  = CausalLinkClaim(**claim_data, step=self._step)
             vresult = verify_causal_claim(claim, self._anomaly_info)
             reward  = intermediate_claim_reward(vresult)
             self._claims.append({**claim.to_dict(), "claim_type": "causal"})
@@ -156,7 +158,9 @@ class ArbiterEnv:
             info["verification"] = vresult
 
         elif atype == "CLAIM_COUNTERFACTUAL":
-            claim   = CounterfactualClaim(**action["claim"], step=self._step)
+            _SKIP = {"type", "action", "claim"}
+            claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
+            claim   = CounterfactualClaim(**claim_data, step=self._step)
             last_cf = info.get("cf_result") or self._last_cf_result
             if last_cf:
                 vresult = verify_counterfactual_claim(claim, last_cf)
@@ -171,7 +175,9 @@ class ArbiterEnv:
             if not self.curriculum.tom_claims_enabled:
                 info["error"] = "Theory-of-mind claims only available at Level 4+"
             else:
-                claim   = TheoryOfMindClaim(**action["claim"], step=self._step)
+                _SKIP = {"type", "action", "claim"}
+                claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
+                claim   = TheoryOfMindClaim(**claim_data, step=self._step)
                 vresult = verify_theory_of_mind_claim(claim, self.defender.action_log)
                 reward  = intermediate_claim_reward(vresult)
                 self._claims.append({**claim.to_dict(), "claim_type": "theory_of_mind"})
