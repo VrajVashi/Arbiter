@@ -13,3 +13,4 @@ huggingface_hub>=0.21
 pydantic>=2.0
 fastapi>=0.110
 uvicorn>=0.27
+openenv-core>=0.2.3
