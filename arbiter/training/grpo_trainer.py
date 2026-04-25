@@ -118,7 +118,7 @@ def generate_action(obs: Dict, history: List[Dict]) -> Tuple[Dict, str, str, tor
     prompt_ids and gen_ids are stored on CPU for memory efficiency.
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for h in history[-6:]:
+    for h in history[-3:]:   # reduced from 6 to 3 to stay within 1024 tokens
         messages.append({"role": "user",      "content": h["obs_text"]})
         messages.append({"role": "assistant", "content": h["action_text"]})
 
