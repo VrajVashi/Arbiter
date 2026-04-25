@@ -150,26 +150,34 @@ class ArbiterEnv:
         elif atype == "CLAIM_CAUSAL":
             _SKIP = {"type", "action", "claim"}
             claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
-            claim  = CausalLinkClaim(**claim_data, step=self._step)
-            vresult = verify_causal_claim(claim, self._anomaly_info)
-            reward  = intermediate_claim_reward(vresult)
-            self._claims.append({**claim.to_dict(), "claim_type": "causal"})
-            self._claim_rewards.append(reward)
-            info["verification"] = vresult
+            try:
+                claim  = CausalLinkClaim(**claim_data, step=self._step)
+                vresult = verify_causal_claim(claim, self._anomaly_info)
+                reward  = intermediate_claim_reward(vresult)
+                self._claims.append({**claim.to_dict(), "claim_type": "causal"})
+                self._claim_rewards.append(reward)
+                info["verification"] = vresult
+            except (TypeError, KeyError) as e:
+                info["error"] = f"Invalid CLAIM_CAUSAL fields: {e}"
+                reward = 0.0
 
         elif atype == "CLAIM_COUNTERFACTUAL":
             _SKIP = {"type", "action", "claim"}
             claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
-            claim   = CounterfactualClaim(**claim_data, step=self._step)
-            last_cf = info.get("cf_result") or self._last_cf_result
-            if last_cf:
-                vresult = verify_counterfactual_claim(claim, last_cf)
-                reward  = intermediate_claim_reward(vresult)
-            else:
-                vresult = {"error": "No counterfactual result available. Run QUERY_COUNTERFACTUAL first."}
-            self._claims.append({**claim.to_dict(), "claim_type": "counterfactual"})
-            self._claim_rewards.append(reward)
-            info["verification"] = vresult
+            try:
+                claim   = CounterfactualClaim(**claim_data, step=self._step)
+                last_cf = info.get("cf_result") or self._last_cf_result
+                if last_cf:
+                    vresult = verify_counterfactual_claim(claim, last_cf)
+                    reward  = intermediate_claim_reward(vresult)
+                else:
+                    vresult = {"error": "No counterfactual result available. Run QUERY_COUNTERFACTUAL first."}
+                self._claims.append({**claim.to_dict(), "claim_type": "counterfactual"})
+                self._claim_rewards.append(reward)
+                info["verification"] = vresult
+            except (TypeError, KeyError) as e:
+                info["error"] = f"Invalid CLAIM_COUNTERFACTUAL fields: {e}"
+                reward = 0.0
 
         elif atype == "CLAIM_THEORY_OF_MIND":
             if not self.curriculum.tom_claims_enabled:
@@ -177,12 +185,16 @@ class ArbiterEnv:
             else:
                 _SKIP = {"type", "action", "claim"}
                 claim_data = action.get("claim") or {k: v for k, v in action.items() if k not in _SKIP}
-                claim   = TheoryOfMindClaim(**claim_data, step=self._step)
-                vresult = verify_theory_of_mind_claim(claim, self.defender.action_log)
-                reward  = intermediate_claim_reward(vresult)
-                self._claims.append({**claim.to_dict(), "claim_type": "theory_of_mind"})
-                self._claim_rewards.append(reward)
-                info["verification"] = vresult
+                try:
+                    claim   = TheoryOfMindClaim(**claim_data, step=self._step)
+                    vresult = verify_theory_of_mind_claim(claim, self.defender.action_log)
+                    reward  = intermediate_claim_reward(vresult)
+                    self._claims.append({**claim.to_dict(), "claim_type": "theory_of_mind"})
+                    self._claim_rewards.append(reward)
+                    info["verification"] = vresult
+                except (TypeError, KeyError) as e:
+                    info["error"] = f"Invalid CLAIM_THEORY_OF_MIND fields: {e}"
+                    reward = 0.0
 
         elif atype == "SUBMIT_REPORT":
             return self._handle_submit_report(action)
