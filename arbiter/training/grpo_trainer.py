@@ -71,7 +71,7 @@ try:
     from unsloth import FastLanguageModel
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.checkpoint, max_seq_length=1024, load_in_4bit=True)
-    FastLanguageModel.for_inference(model)
+    FastLanguageModel.for_training(model)
     UNSLOTH = True
 except Exception:
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -202,7 +202,7 @@ def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_
     total_loss = 0.0
     batch_rewards = [sum(t["reward"] for t in traj) for traj in trajectories]
     mean_reward = np.mean(batch_rewards)
-    std_reward  = np.std(batch_rewards) + 1e-8
+    std_reward  = max(np.std(batch_rewards), 1.0)  # floor prevents explosion when rewards cluster
 
     for traj, ep_reward in zip(trajectories, batch_rewards):
         advantage = (ep_reward - mean_reward) / std_reward
@@ -214,6 +214,10 @@ def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_
 
             tokens = tokenizer(action_text, return_tensors="pt",
                                max_length=200, truncation=True).to(device)
+            input_ids = tokens["input_ids"]  # [1, seq_len]
+
+            if input_ids.shape[1] < 2:
+                continue
 
             # Reference logits — frozen SFT copy, no grad
             with torch.no_grad():
@@ -222,14 +226,20 @@ def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_
             # Policy logits — live model, grad enabled
             train_logits = model(**tokens).logits
 
-            log_probs     = torch.nn.functional.log_softmax(train_logits, dim=-1)
-            ref_log_probs = torch.nn.functional.log_softmax(ref_logits,   dim=-1)
+            log_probs_dist     = torch.nn.functional.log_softmax(train_logits, dim=-1)
+            ref_log_probs_dist = torch.nn.functional.log_softmax(ref_logits,   dim=-1)
 
-            # Forward KL: KL(ref || policy) = sum ref * (log_ref - log_policy)
-            kl = (ref_log_probs.exp() * (ref_log_probs - log_probs)).sum(-1).mean()
+            # Extract log prob of each ACTUAL generated token via gather.
+            # Shift by 1: position i predicts token i+1.
+            target_ids = input_ids[0, 1:].unsqueeze(1)                          # [seq-1, 1]
+            tok_log_probs     = log_probs_dist[0, :-1].gather(1, target_ids).squeeze(1)      # [seq-1]
+            ref_tok_log_probs = ref_log_probs_dist[0, :-1].gather(1, target_ids).squeeze(1)  # [seq-1]
 
-            # GRPO objective
-            loss = -advantage * log_probs.mean() + kl_coef * kl
+            # KL per token: KL(ref || policy) ≈ mean(log_ref - log_policy)
+            kl = (ref_tok_log_probs - tok_log_probs).mean()
+
+            # GRPO objective: push up log prob of tokens from high-advantage episodes
+            loss = -advantage * tok_log_probs.mean() + kl_coef * kl
             total_loss += loss.item()
             loss.backward()
 
