@@ -243,6 +243,8 @@ def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_
             total_loss += loss.item()
             loss.backward()
 
+    torch.nn.utils.clip_grad_norm_(
+        [p for p in model.parameters() if p.requires_grad], max_norm=1.0)
     optimizer.step()
     optimizer.zero_grad()
     model.eval()
