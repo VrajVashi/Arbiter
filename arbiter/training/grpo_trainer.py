@@ -24,8 +24,16 @@ import json
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Silence noisy transformers / unsloth deprecation warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*max_new_tokens.*max_length.*")
+warnings.filterwarnings("ignore", message=".*attention mask.*")
+warnings.filterwarnings("ignore", message=".*use_return_dict.*")
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import numpy as np
