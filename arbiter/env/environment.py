@@ -124,10 +124,13 @@ class ArbiterEnv:
             info["query_result"] = result
 
         elif atype == "QUERY_COUNTERFACTUAL":
-            result = self._handle_query_counterfactual(action)
-            self._budget -= 2
-            info["query_result"] = result
-            info["cf_result"]    = result
+            if self._budget < 2:
+                info["error"] = "Insufficient budget for QUERY_COUNTERFACTUAL (costs 2)."
+            else:
+                result = self._handle_query_counterfactual(action)
+                self._budget -= 2
+                info["query_result"] = result
+                info["cf_result"]    = result
 
         elif atype == "FLAG_HYPOTHESIS":
             self._handle_flag_hypothesis(action)
@@ -170,11 +173,15 @@ class ArbiterEnv:
                 if last_cf:
                     vresult = verify_counterfactual_claim(claim, last_cf)
                     reward  = intermediate_claim_reward(vresult)
+                    self._claims.append({**claim.to_dict(), "claim_type": "counterfactual"})
+                    self._claim_rewards.append(reward)
+                    info["verification"] = vresult
                 else:
-                    vresult = {"error": "No counterfactual result available. Run QUERY_COUNTERFACTUAL first."}
-                self._claims.append({**claim.to_dict(), "claim_type": "counterfactual"})
-                self._claim_rewards.append(reward)
-                info["verification"] = vresult
+                    # Prerequisite missing: penalise and discard the claim so the
+                    # model learns this ordering constraint, not that CF claims are free.
+                    reward = -1.0
+                    self._claim_rewards.append(reward)
+                    info["error"] = "CLAIM_COUNTERFACTUAL requires a prior QUERY_COUNTERFACTUAL. Claim not recorded."
             except (TypeError, KeyError) as e:
                 info["error"] = f"Invalid CLAIM_COUNTERFACTUAL fields: {e}"
                 reward = 0.0
