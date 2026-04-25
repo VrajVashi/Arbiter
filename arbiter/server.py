@@ -33,6 +33,21 @@ from arbiter.env.environment import (
 from arbiter.env.dual_env import (
     DualArbiterEnv, create_dual_session, get_dual_session, list_dual_sessions
 )
+try:
+    from arbiter.env.openenv_wrapper import ArbiterEnvironment, ArbiterAction, ArbiterObservation
+    _HAS_OPENENV_WRAPPER = True
+except ImportError:
+    _HAS_OPENENV_WRAPPER = False
+
+# ── OpenEnv-native app (for TRL / Unsloth GRPO integration) ─────────────
+openenv_app = None
+if _HAS_OPENENV_WRAPPER:
+    try:
+        from openenv.core import create_app as _openenv_create_app
+        _arbiter_openenv_env = ArbiterEnvironment(level=1)
+        openenv_app = _openenv_create_app(_arbiter_openenv_env, ArbiterAction)
+    except Exception as _e:
+        print(f"[server] OpenEnv native app skipped: {_e}")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -290,8 +305,15 @@ def _serialize(obj):
 
 def main():
     print("Starting ARBITER API server...")
-    print("Swagger docs: http://localhost:8000/docs")
+    print("REST API docs:   http://localhost:8000/docs")
+    if openenv_app:
+        print("OpenEnv app:     http://localhost:8000/openenv")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
+
+# Mount OpenEnv sub-app if available (enables /openenv/* WebSocket endpoints)
+if openenv_app:
+    app.mount("/openenv", openenv_app)
 
 
 if __name__ == "__main__":
