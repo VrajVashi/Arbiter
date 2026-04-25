@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import sys
-import time
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -54,7 +53,7 @@ parser.add_argument("--output",        default="lora_grpo/")
 parser.add_argument("--log_file",      default="logs/grpo_rewards.jsonl")
 parser.add_argument("--terminal_only", action="store_true",
                     help="Ablation: disable intermediate rewards (terminal only)")
-parser.add_argument("--batch_size",    type=int, default=4, help="Episodes per GRPO update")
+parser.add_argument("--batch_size",    type=int, default=8, help="Episodes per GRPO update")
 parser.add_argument("--lr",            type=float, default=1e-5)
 parser.add_argument("--kl_coef",       type=float, default=0.05)
 parser.add_argument("--seed",          type=int, default=42)
@@ -95,45 +94,73 @@ ref_model.eval()
 print("Reference model frozen.")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-SYSTEM_PROMPT = """You are an expert AI auditor. Output exactly one JSON action per turn.
+MAX_SEQ_LEN = 1024  # hard cap to avoid OOM on long histories
+
+SYSTEM_PROMPT = """You are an expert AI bias auditor investigating an AI decision system for hidden discrimination.
+
+INVESTIGATION PROTOCOL (follow this order every episode):
+1. Steps 0-4:   QUERY_RECORDS and QUERY_FEATURE_DISTRIBUTION to gather evidence
+2. Steps 5-7:   FLAG_HYPOTHESIS to identify suspected bias patterns
+3. Steps 8-15:  CLAIM_CAUSAL or CLAIM_COUNTERFACTUAL to assert findings — make AT LEAST 3 claims
+4. Steps 16-19: SUBMIT_REPORT only after making at least 3 claims
+
+WARNING: Submitting before step 8 without claims scores near 0. Thorough investigation scores up to 30.
+
 Available actions: QUERY_RECORDS, QUERY_FEATURE_DISTRIBUTION, QUERY_COUNTERFACTUAL,
-FLAG_HYPOTHESIS, CLAIM_CAUSAL, CLAIM_COUNTERFACTUAL, CLAIM_THEORY_OF_MIND, SUBMIT_REPORT."""
+FLAG_HYPOTHESIS, CLAIM_CAUSAL, CLAIM_COUNTERFACTUAL, CLAIM_THEORY_OF_MIND, SUBMIT_REPORT.
+Output exactly one JSON action per turn as valid JSON."""
 
 
-def generate_action(obs: Dict, history: List[Dict]) -> Tuple[Dict, str]:
-    """Query the LLM for the next action given observation."""
+def generate_action(obs: Dict, history: List[Dict]) -> Tuple[Dict, str, str, torch.Tensor, torch.Tensor]:
+    """
+    Query the LLM for the next action given observation.
+    Returns (action, action_text, obs_text, prompt_ids_cpu, gen_ids_cpu).
+    prompt_ids and gen_ids are stored on CPU for memory efficiency.
+    """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for h in history[-6:]:   # last 6 turns of context
+    for h in history[-6:]:
         messages.append({"role": "user",      "content": h["obs_text"]})
         messages.append({"role": "assistant", "content": h["action_text"]})
 
+    step       = obs.get("step", 0)
+    num_claims = obs.get("num_claims", 0)
+    if step < 5:
+        hint = "ACTION NEEDED: Query records/features to gather evidence."
+    elif num_claims == 0:
+        hint = "ACTION NEEDED: FLAG_HYPOTHESIS then CLAIM_CAUSAL — you have no claims yet."
+    elif num_claims < 3:
+        hint = f"ACTION NEEDED: Make more CLAIM_CAUSAL or CLAIM_COUNTERFACTUAL ({num_claims}/3 claims done)."
+    else:
+        hint = f"You have {num_claims} claims. You may SUBMIT_REPORT or make more claims."
+
     obs_text = (
-        f"Step {obs.get('step',0)}/20 | Budget: {obs.get('budget_remaining',20)} | "
-        f"Claims: {obs.get('num_claims',0)} | Level: {obs.get('level',1)}\n"
-        f"Hypothesis flags: {obs.get('hypothesis_flags',{})}\n"
-        f"Features: {list(obs.get('features',{}).get('explicit',[]))}\n"
+        f"Step {step}/20 | Budget: {obs.get('budget_remaining', 20)} | "
+        f"Claims: {num_claims} | Level: {obs.get('level', 1)}\n"
+        f"Hypothesis flags: {obs.get('hypothesis_flags', {})}\n"
+        f"Features: {list(obs.get('features', {}).get('explicit', []))}\n"
+        f"{hint}\n"
         f"Output your next JSON action:"
     )
     messages.append({"role": "user", "content": obs_text})
 
-    input_ids = tokenizer.apply_chat_template(
+    prompt_ids = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True,
-        return_tensors="pt").to(device)
+        return_tensors="pt").to(device)                          # [1, prompt_len]
 
     with torch.no_grad():
         output = model.generate(
-            input_ids, max_new_tokens=200, temperature=0.7,
+            prompt_ids, max_new_tokens=200, temperature=0.7,
             do_sample=True, pad_token_id=tokenizer.eos_token_id)
 
-    gen_tokens = output[0][input_ids.shape[1]:]
-    action_text = tokenizer.decode(gen_tokens, skip_special_tokens=True).strip()
+    gen_ids    = output[0][prompt_ids.shape[1]:]                 # [gen_len]
+    action_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
     # Parse JSON
     try:
         action = json.loads(action_text)
     except json.JSONDecodeError:
         import re
-        m = re.search(r'\{.*?\}', action_text, re.DOTALL)
+        m = re.search(r"\{.*?\}", action_text, re.DOTALL)
         if m:
             try:
                 action = json.loads(m.group())
@@ -142,7 +169,13 @@ def generate_action(obs: Dict, history: List[Dict]) -> Tuple[Dict, str]:
         else:
             action = {"type": "QUERY_RECORDS", "feature_filter": {}}
 
-    return action, action_text, obs_text
+    return (
+        action,
+        action_text,
+        obs_text,
+        prompt_ids[0].cpu(),   # store on CPU — moved to GPU only during update
+        gen_ids.cpu(),
+    )
 
 
 def run_episode(env: ArbiterEnv, seed: int, terminal_only: bool = False
@@ -150,19 +183,20 @@ def run_episode(env: ArbiterEnv, seed: int, terminal_only: bool = False
     """
     Run one complete episode with the LLM.
     Returns (total_reward, step_rewards, trajectory).
+    Trajectory entries include prompt_ids and gen_ids for context-conditioned update.
     """
-    obs = env.reset(seed=seed)
-    history = []
-    step_rewards = []
-    trajectory   = []
+    obs            = env.reset(seed=seed)
+    history        = []
+    step_rewards   = []
+    trajectory     = []
     episode_reward = 0.0
 
     for step in range(20):
-        action, action_text, obs_text = generate_action(obs, history)
+        action, action_text, obs_text, prompt_ids, gen_ids = generate_action(obs, history)
         next_obs, reward, done, info = env.step(action)
 
         if terminal_only and not done:
-            reward = 0.0   # zero out intermediate rewards for ablation
+            reward = 0.0
 
         step_rewards.append(reward)
         episode_reward += reward
@@ -173,16 +207,25 @@ def run_episode(env: ArbiterEnv, seed: int, terminal_only: bool = False
             "action":      action,
             "action_text": action_text,
             "obs_text":    obs_text,
+            "prompt_ids":  prompt_ids,   # CPU tensor [prompt_len]
+            "gen_ids":     gen_ids,      # CPU tensor [gen_len]
             "reward":      reward,
             "done":        done,
         })
-        history.append({"obs_text": obs_text, "action_text": action_text})
+
+        # Record the clean parsed JSON in history to avoid garbled-JSON context
+        history.append({
+            "obs_text":    obs_text,
+            "action_text": json.dumps(action),
+        })
 
         obs = next_obs
         if done:
-            # Add terminal reward if not already done
             if terminal_only and "episode_reward" in info:
-                episode_reward += info["episode_reward"]["terminal"]["terminal_total"]
+                terminal_total = (info["episode_reward"]
+                                  .get("terminal", {})
+                                  .get("terminal_total", 0.0))
+                episode_reward += terminal_total
             break
 
     return episode_reward, step_rewards, trajectory
@@ -190,63 +233,91 @@ def run_episode(env: ArbiterEnv, seed: int, terminal_only: bool = False
 
 def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_coef: float):
     """
-    GRPO update:
+    GRPO update with context-conditioned log-probs.
+
+    - Log-probs are computed on the FULL prompt+action sequence so the gradient
+      signal matches the generative distribution π(action | prompt).
     - Advantage = (ep_reward - mean) / std  (normalised across the batch)
-    - KL penalty computed against the FROZEN SFT reference model
-    - Loss = -advantage * mean(log_prob) + kl_coef * KL(ref || policy)
+    - KL = KL(policy || ref) computed with samples from the current policy
+    - Loss per step = -advantage * mean(tok_log_probs) + kl_coef * KL
+    - Loss is normalised by total valid steps for proper gradient accumulation
     """
     if not trajectories:
         return 0.0
 
+    # Fix: zero gradients at the START so stale grads never leak in
+    optimizer.zero_grad()
     model.train()
-    total_loss = 0.0
+
     batch_rewards = [sum(t["reward"] for t in traj) for traj in trajectories]
-    mean_reward = np.mean(batch_rewards)
-    std_reward  = max(np.std(batch_rewards), 1.0)  # floor prevents explosion when rewards cluster
+    mean_reward   = np.mean(batch_rewards)
+    std_reward    = max(np.std(batch_rewards), 1.0)
+
+    # Count valid steps up front for loss normalisation (Fix #3)
+    total_steps = max(1, sum(
+        1 for traj in trajectories
+        for sd in traj
+        if sd.get("gen_ids") is not None and sd["gen_ids"].shape[0] >= 1
+    ))
+
+    total_loss = 0.0
 
     for traj, ep_reward in zip(trajectories, batch_rewards):
         advantage = (ep_reward - mean_reward) / std_reward
 
         for step_data in traj:
-            action_text = step_data["action_text"]
-            if not action_text:
+            prompt_ids = step_data.get("prompt_ids")
+            gen_ids    = step_data.get("gen_ids")
+
+            if prompt_ids is None or gen_ids is None or gen_ids.shape[0] < 1:
                 continue
 
-            tokens = tokenizer(action_text, return_tensors="pt",
-                               max_length=200, truncation=True).to(device)
-            input_ids = tokens["input_ids"]  # [1, seq_len]
+            prompt_ids = prompt_ids.to(device)   # [prompt_len]
+            gen_ids    = gen_ids.to(device)       # [gen_len]
+            gen_len    = gen_ids.shape[0]
 
-            if input_ids.shape[1] < 2:
+            # Build full sequence [prompt | generated] and truncate to MAX_SEQ_LEN
+            full_ids = torch.cat([prompt_ids, gen_ids]).unsqueeze(0)  # [1, total_len]
+            if full_ids.shape[1] > MAX_SEQ_LEN:
+                # Always keep all gen tokens; trim prompt from the left
+                trim    = full_ids.shape[1] - MAX_SEQ_LEN
+                full_ids = full_ids[:, trim:]
+
+            prompt_len = full_ids.shape[1] - gen_len
+            if prompt_len < 1:
                 continue
 
-            # Reference logits — frozen SFT copy, no grad
+            # Reference logits — frozen, no grad
             with torch.no_grad():
-                ref_logits = ref_model(**tokens).logits
+                ref_logits = ref_model(input_ids=full_ids).logits   # [1, seq_len, vocab]
 
-            # Policy logits — live model, grad enabled
-            train_logits = model(**tokens).logits
+            # Policy logits — grad enabled
+            train_logits = model(input_ids=full_ids).logits         # [1, seq_len, vocab]
 
-            log_probs_dist     = torch.nn.functional.log_softmax(train_logits, dim=-1)
-            ref_log_probs_dist = torch.nn.functional.log_softmax(ref_logits,   dim=-1)
+            # Positions [prompt_len-1 : prompt_len+gen_len-1] predict the gen tokens.
+            gen_start = prompt_len - 1
+            gen_end   = prompt_len + gen_len - 1  # exclusive
 
-            # Extract log prob of each ACTUAL generated token via gather.
-            # Shift by 1: position i predicts token i+1.
-            target_ids = input_ids[0, 1:].unsqueeze(1)                          # [seq-1, 1]
-            tok_log_probs     = log_probs_dist[0, :-1].gather(1, target_ids).squeeze(1)      # [seq-1]
-            ref_tok_log_probs = ref_log_probs_dist[0, :-1].gather(1, target_ids).squeeze(1)  # [seq-1]
+            log_probs_dist     = torch.nn.functional.log_softmax(
+                train_logits[0, gen_start:gen_end], dim=-1)          # [gen_len, vocab]
+            ref_log_probs_dist = torch.nn.functional.log_softmax(
+                ref_logits[0,  gen_start:gen_end], dim=-1)            # [gen_len, vocab]
 
-            # KL per token: KL(ref || policy) ≈ mean(log_ref - log_policy)
-            kl = (ref_tok_log_probs - tok_log_probs).mean()
+            target_ids = gen_ids.unsqueeze(1)                         # [gen_len, 1]
+            tok_log_probs     = log_probs_dist.gather(1, target_ids).squeeze(1)       # [gen_len]
+            ref_tok_log_probs = ref_log_probs_dist.gather(1, target_ids).squeeze(1)   # [gen_len]
 
-            # GRPO objective: push up log prob of tokens from high-advantage episodes
-            loss = -advantage * tok_log_probs.mean() + kl_coef * kl
-            total_loss += loss.item()
+            # KL(policy || ref) with samples from policy (Fix #5 — sign was inverted)
+            kl = (tok_log_probs - ref_tok_log_probs).mean()
+
+            # Normalise by total_steps for proper gradient accumulation (Fix #3)
+            loss = (-advantage * tok_log_probs.mean() + kl_coef * kl) / total_steps
+            total_loss += loss.item() * total_steps   # log unscaled value
             loss.backward()
 
     torch.nn.utils.clip_grad_norm_(
         [p for p in model.parameters() if p.requires_grad], max_norm=1.0)
     optimizer.step()
-    optimizer.zero_grad()
     model.eval()
     return total_loss / max(1, len(trajectories))
 
@@ -255,7 +326,7 @@ def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_
 Path(args.log_file).parent.mkdir(parents=True, exist_ok=True)
 Path(args.output).mkdir(parents=True, exist_ok=True)
 
-env = ArbiterEnv(level=args.level, seed=args.seed)
+env       = ArbiterEnv(level=args.level, seed=args.seed)
 curriculum = env.curriculum
 
 optimizer = torch.optim.AdamW(
@@ -269,8 +340,7 @@ print(f"GRPO Training | Level {args.level} | {args.episodes} episodes | "
 print("-" * 70)
 
 for ep in range(args.episodes):
-    # Collect batch of episodes
-    batch_trajs  = []
+    batch_trajs   = []
     batch_rewards = []
 
     for b in range(args.batch_size):
@@ -283,26 +353,22 @@ for ep in range(args.episodes):
     mean_ep_reward = float(np.mean(batch_rewards))
     reward_log.append(mean_ep_reward)
 
-    # Estimate Defender evasion rate (fraction of episodes where Defender fooled Auditor)
     evasion = sum(1 for r in batch_rewards if r < 15) / len(batch_rewards)
     defender_log.append(evasion)
 
-    # GRPO update
     loss = grpo_update(model, ref_model, optimizer, batch_trajs, kl_coef=args.kl_coef)
 
-    # Curriculum check
     new_level = curriculum.record(mean_ep_reward)
 
-    # Log
     log_entry = {
-        "episode":      ep,
-        "mean_reward":  round(mean_ep_reward, 2),
-        "batch_rewards": [round(r, 2) for r in batch_rewards],
+        "episode":          ep,
+        "mean_reward":      round(mean_ep_reward, 2),
+        "batch_rewards":    [round(r, 2) for r in batch_rewards],
         "defender_evasion": round(evasion, 3),
-        "grpo_loss":    round(loss, 4),
-        "level":        curriculum.level,
-        "level_advanced": new_level,
-        "terminal_only": args.terminal_only,
+        "grpo_loss":        round(loss, 4),
+        "level":            curriculum.level,
+        "level_advanced":   new_level,
+        "terminal_only":    args.terminal_only,
     }
     with open(args.log_file, "a") as f:
         f.write(json.dumps(log_entry) + "\n")
@@ -319,14 +385,13 @@ for ep in range(args.episodes):
 model.save_pretrained(args.output)
 tokenizer.save_pretrained(args.output)
 
-# Save reward log as JSON summary
 summary = {
-    "episodes":     args.episodes,
-    "level":        args.level,
-    "terminal_only": args.terminal_only,
+    "episodes":          args.episodes,
+    "level":             args.level,
+    "terminal_only":     args.terminal_only,
     "final_mean_reward": round(float(np.mean(reward_log[-10:])), 2),
-    "reward_curve": reward_log,
-    "defender_evasion": defender_log,
+    "reward_curve":      reward_log,
+    "defender_evasion":  defender_log,
 }
 Path(f"{args.output}/training_summary.json").write_text(json.dumps(summary, indent=2))
 
